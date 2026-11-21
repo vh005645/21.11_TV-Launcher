@@ -22,30 +22,72 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # KHÔNG dùng android-actions/setup-android nữa.
-      # Runner ubuntu-latest đã có sẵn Android SDK ở $ANDROID_HOME.
-      # Chỉ cài thêm đúng 3 package còn tồn tại: platform-tools, platforms;android-35, build-tools;35.0.0
-      # Lỗi cũ: packages: tools -> sdkmanager báo "Failed to find package 'tools'" -> exit code 1
       - name: Install Android SDK packages
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          ls "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      # Repo của bạn trên GitHub KHÔNG có thư mục tv_launcher/ ở root
+      # (file AndroidManifest.xml, src/, res/ nằm ngay ở root),
+      # trong khi file zip gốc lại có tv_launcher/ bọc ngoài.
+      # Bước này tự tìm đúng thư mục chứa AndroidManifest.xml để build,
+      # chạy được cho cả 2 kiểu cấu trúc.
+      - name: Detect app dir
+        run: |
+          echo "=== Repo layout (root) ==="
+          ls -la
+          echo "=== Tim AndroidManifest.xml ==="
+          find . -maxdepth 3 -name "AndroidManifest.xml" -not -path "./.git/*" | head -n 20
+          echo "=== Tim keystore ==="
+          find . -maxdepth 3 -name "*.jks" -not -path "./.git/*" | head -n 20
+
+          APP_DIR="."
+          if [ -d tv_launcher ] && [ -f tv_launcher/AndroidManifest.xml ]; then
+            APP_DIR="tv_launcher"
+          elif [ -f AndroidManifest.xml ]; then
+            APP_DIR="."
+          else
+            MANIFEST=$(find . -maxdepth 3 -name "AndroidManifest.xml" -not -path "./.git/*" | head -n 1)
+            if [ -n "$MANIFEST" ]; then
+              APP_DIR=$(dirname "$MANIFEST")
+            fi
+          fi
+
+          # Chuẩn hoá: "." giữ nguyên, còn lại bỏ ./ ở đầu
+          APP_DIR="${APP_DIR#./}"
+          if [ -z "$APP_DIR" ]; then APP_DIR="."; fi
+
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          echo "Detected APP_DIR=$APP_DIR"
+          ls -la "$APP_DIR"
+          ls -la "$APP_DIR/src" 2>/dev/null || true
 
       - name: Build APK (Linux, no Gradle, no .exe)
         run: |
           set -euo pipefail
-          cd tv_launcher
+          echo "Building in APP_DIR=$APP_DIR"
+          cd "$APP_DIR"
           SDK="$ANDROID_HOME"
           BT="$SDK/build-tools/35.0.0"
           PLAT="$SDK/platforms/android-35/android.jar"
-          KEYSTORE="vn-hero-sign.jks"
+
+          # Tìm keystore: ưu tiên trong cùng thư mục app, rồi tới tv_launcher/, rồi root
+          if [ -f "vn-hero-sign.jks" ]; then
+            KEYSTORE="vn-hero-sign.jks"
+          elif [ -f "../vn-hero-sign.jks" ]; then
+            KEYSTORE="../vn-hero-sign.jks"
+          elif [ -f "tv_launcher/vn-hero-sign.jks" ]; then
+            KEYSTORE="tv_launcher/vn-hero-sign.jks"
+          else
+            echo "ERROR: khong tim thay vn-hero-sign.jks"
+            find . .. -maxdepth 3 -name "*.jks" 2>/dev/null || true
+            exit 1
+          fi
+          echo "KEYSTORE=$KEYSTORE"
+
           ALIAS="vnhero"
           PASS="android"
 
-          echo "BT=$BT"
           ls -l "$BT/aapt2" "$BT/zipalign" "$PLAT" "$KEYSTORE"
 
           OUT=build
@@ -92,12 +134,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tvlauncher-apk
-          path: tv_launcher/build/tvlauncher.apk
+          path: ${{ env.APP_DIR }}/build/tvlauncher.apk
           if-no-files-found: error
 
       - name: Create Release (only on v* tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: tv_launcher/build/tvlauncher.apk
+          files: ${{ env.APP_DIR }}/build/tvlauncher.apk
           generate_release_notes: true
