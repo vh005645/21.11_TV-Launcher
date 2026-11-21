@@ -11,9 +11,9 @@ HƯỚNG DẪN NHANH - HỆ THỐNG ĐIỀU KHIỂN TV QUA FIREBASE
            "devices": { "$id": { ".read": true, ".write": true } }
          }
        }
-     (Không ai liệt kê được danh sách TV; chỉ người biết mã thiết bị 8 ký tự mới truy cập được.)
+     (Không ai liệt kê được danh sách TV; chỉ người biết link Firebase + mã thiết bị mới truy cập được.)
 
 2) App TV (tv_launcher): mở src/vn/herotran/launcher/RemoteConfig.java, sửa DEFAULT_DB_URL thành URL ở trên rồi build.
-3) App điện thoại (tv_remote_mobile): URL nhập ngay trong app (nút Cài đặt) cùng với mã TV.
+3) App điện thoại (tv_remote_mobile): chỉ cần dán link Firebase trong app (nút Cài đặt). Mã thiết bị đã đặt cố định sẵn trong cả 2 app.
 4) Trên TV: bấm phím Menu 5 lần -> màn hình cài đặt ẩn -> bấm (1) Cấp quyền Overlay, (2) Kết nối Local ADB
-   (tích "Always allow" rồi Allow trên hộp thoại), (3) Test ADB. Đọc mã thiết bị 8 ký tự rồi nhập vào app điện thoại.
+   (tích "Always allow" rồi Allow trên hộp thoại), (3) Test ADB.

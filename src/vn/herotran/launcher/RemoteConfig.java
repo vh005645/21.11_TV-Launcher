@@ -2,7 +2,6 @@ package vn.herotran.launcher;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import java.security.SecureRandom;
 
 /** Cấu hình hệ thống điều khiển từ xa (Firebase Realtime Database + device_id). */
 public final class RemoteConfig {
@@ -13,9 +12,11 @@ public final class RemoteConfig {
     // Ví dụ: https://ten-du-an-default-rtdb.firebaseio.com  (không có dấu / ở cuối)
     public static final String DEFAULT_DB_URL = "https://tvcontrol-d7dc1-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-    public static final int ADB_PORT = 5555;
+    // Mã thiết bị CỐ ĐỊNH (dãy số). App điện thoại dùng đúng mã này (RemoteViewModel.DEFAULT_DEVICE_ID).
+    // Muốn đổi thì sửa ở CẢ HAI nơi cho giống nhau.
+    public static final String DEVICE_ID = "246500068385";
 
-    private static final String ID_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    public static final int ADB_PORT = 5555;
 
     public static SharedPreferences prefs(Context c) {
         return c.getApplicationContext().getSharedPreferences("remote_cfg", Context.MODE_PRIVATE);
@@ -38,28 +39,7 @@ public final class RemoteConfig {
         return u.startsWith("https://") && !u.contains("YOUR-PROJECT");
     }
 
-    public static synchronized String deviceId(Context c) {
-        SharedPreferences p = prefs(c);
-        String id = p.getString("device_id", null);
-        if (id == null || id.length() < 6) {
-            id = randomId();
-            p.edit().putString("device_id", id).apply();
-        }
-        return id;
-    }
-
-    public static synchronized String newDeviceId(Context c) {
-        String id = randomId();
-        prefs(c).edit().putString("device_id", id).remove("last_cmd_ts").apply();
-        return id;
-    }
-
-    private static String randomId() {
-        SecureRandom r = new SecureRandom();
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 8; i++) {
-            sb.append(ID_ALPHABET.charAt(r.nextInt(ID_ALPHABET.length())));
-        }
-        return sb.toString();
+    public static String deviceId(Context c) {
+        return DEVICE_ID;
     }
 }

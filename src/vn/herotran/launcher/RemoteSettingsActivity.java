@@ -93,9 +93,9 @@ public class RemoteSettingsActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         root.addView(label("Cài đặt điều khiển từ xa", 30, Color.WHITE, true));
-        root.addView(label("Nhập mã thiết bị này vào app điện thoại:", 18, Color.parseColor("#9AA4B2"), false), rowParams());
+        root.addView(label("Mã thiết bị (cố định, app điện thoại dùng cùng mã này):", 18, Color.parseColor("#9AA4B2"), false), rowParams());
 
-        tvId = label("", 54, Color.parseColor("#FFC107"), true);
+        tvId = label("", 44, Color.parseColor("#FFC107"), true);
         tvId.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         root.addView(tvId);
 
@@ -134,19 +134,6 @@ public class RemoteSettingsActivity extends Activity {
                     return;
                 }
                 s.testAdbAsync();
-            }
-        }), rowParams());
-
-        root.addView(button("4. Tạo mã thiết bị mới", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                RemoteConfig.newDeviceId(RemoteSettingsActivity.this);
-                RemoteService s = RemoteService.get();
-                if (s != null) {
-                    s.restartStream();
-                }
-                toast("Đã tạo mã mới - hãy nhập lại mã này vào điện thoại");
-                updateTexts();
             }
         }), rowParams());
 
