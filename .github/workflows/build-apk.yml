@@ -2,94 +2,152 @@ name: Build TV Launcher APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: tv_launcher
-
     steps:
-      - name: Checkout source
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install SDK packages (platform 35 + build-tools 35.0.0)
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          ls "$ANDROID_HOME/platforms/android-35/android.jar"
 
-      - name: Check source layout
+      - name: Detect project dir
+        id: proj
         run: |
-          test -f AndroidManifest.xml
-          test -d src
-          test -d res
-          test -f vn-hero-sign.jks
-          find src -name '*.java' -print | sort
+          if [ -f "tv_launcher/AndroidManifest.xml" ]; then
+            echo "dir=tv_launcher" >> "$GITHUB_OUTPUT"
+            echo "Project dir: tv_launcher (repo root chứa thư mục tv_launcher/)"
+          elif [ -f "AndroidManifest.xml" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+            echo "Project dir: . (AndroidManifest.xml ở repo root)"
+          else
+            echo "::error::Không tìm thấy AndroidManifest.xml ở repo root hay tv_launcher/"
+            find . -maxdepth 3 -name "AndroidManifest.xml" || true
+            exit 1
+          fi
 
-      - name: Configure Firebase URL (optional)
-        if: ${{ secrets.FIREBASE_DB_URL != '' }}
+      - name: Build APK (aapt2 + javac + d8 + apksigner, không cần Gradle)
         env:
-          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          p = Path('src/vn/herotran/launcher/RemoteConfig.java')
-          s = p.read_text(encoding='utf-8')
-          url = os.environ['FIREBASE_DB_URL'].strip().rstrip('/')
-          s = s.replace(
-              'https://YOUR-PROJECT-default-rtdb.firebaseio.com',
-              url
-          )
-          p.write_text(s, encoding='utf-8')
-          print('Firebase URL configured.')
-          PY
-
-      - name: Build APK
-        shell: bash
+          # --- Keystore: ưu tiên Secrets, fallback về file kèm trong repo ---
+          # Nếu muốn dùng keystore riêng, tạo 3 Secrets trong repo:
+          #   ANDROID_KEYSTORE_BASE64 (base64 của file .jks)
+          #   KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+          # Nếu không tạo Secrets, workflow sẽ dùng tv_launcher/vn-hero-sign.jks
+          # có sẵn trong repo (alias vnhero / pass android).
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           set -euo pipefail
+          PROJECT_DIR="${{ steps.proj.outputs.dir }}"
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          PLAT="$ANDROID_HOME/platforms/android-35/android.jar"
+          echo "BT=$BT"
+          echo "PLAT=$PLAT"
+          echo "PROJECT_DIR=$PROJECT_DIR"
 
-          SDKMANAGER_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
-          BT="$SDKMANAGER_ROOT/build-tools/35.0.0"
-          PLAT="$SDKMANAGER_ROOT/platforms/android-35/android.jar"
-          OUT="build"
-          KEYSTORE="vn-hero-sign.jks"
-          ALIAS="vnhero"
-          PASS="android"
-
+          cd "$PROJECT_DIR"
+          OUT=build
           rm -rf "$OUT"
-          mkdir -p "$OUT/classes" "$OUT/compiled"
+          mkdir -p "$OUT/classes"
 
-          echo "==> Compile resources"
-          "$BT/aapt2" compile --dir res -o "$OUT/compiled/res.zip"
+          # --- 1. Keystore ---
+          ALIAS="${KEY_ALIAS:-vnhero}"
+          PASS="${KEYSTORE_PASSWORD:-android}"
+          KEYPASS="${KEY_PASSWORD:-$PASS}"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "Dùng keystore từ Secrets"
+            echo "$KEYSTORE_B64" | base64 -d > /tmp/release.jks
+            KEYSTORE="/tmp/release.jks"
+          elif [ -f "vn-hero-sign.jks" ]; then
+            echo "Dùng keystore kèm trong repo: vn-hero-sign.jks"
+            KEYSTORE="vn-hero-sign.jks"
+          else
+            echo "::warning::Không thấy keystore, tự tạo keystore tạm để build (APK này sẽ khác chữ ký bản cũ)"
+            keytool -genkeypair -v -keystore /tmp/release.jks -alias "$ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$KEYPASS" \
+              -dname "CN=TV Launcher, OU=Mobile, O=HeroTran, C=VN"
+            KEYSTORE="/tmp/release.jks"
+          fi
 
-          echo "==> Link resources + manifest"
-          "$BT/aapt2" link \
-            -o "$OUT/base.apk" \
-            -I "$PLAT" \
-            --manifest AndroidManifest.xml \
-            "$OUT/compiled/res.zip"
+          # --- 2. Compile + link resources ---
+          LINK_RES=""
+          if [ -d res ]; then
+            mkdir -p "$OUT/compiled"
+            "$BT/aapt2" compile --dir res -o "$OUT/compiled/res.zip"
+            LINK_RES="$OUT/compiled/res.zip"
+          fi
+          "$BT/aapt2" link -o "$OUT/base.apk" -I "$PLAT" --manifest AndroidManifest.xml $LINK_RES
 
-          echo "==> Compile Java"
-          find src -name '*.java' -print | sort > "$OUT/sources.txt"
-          javac --release 8 -Xlint:-options \
-            -cp "$PLAT" \
-            -d "$OUT/classes" \
-            @"$OUT/sources.txt"
+          # --- 3. Compile Java (release 8, minSdk 30 như build.sh gốc) ---
+          find src -name "*.java" > "$OUT/sources.txt"
+          cat "$OUT/sources.txt"
+          javac --release 8 -Xlint:-options -cp "$PLAT" -d "$OUT/classes" @"$OUT/sources.txt"
+
+          # --- 4. Dex với D8 ---
+          java -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 --release --min-api 30 --lib "$PLAT" \
+            --output "$OUT" $(find "$OUT/classes" -name "*.class")
+
+          # --- 5. Nhúng classes.dex vào APK ---
+          python3 - "$OUT" <<'PYEOF'
+          import sys, zipfile, os
+          out = sys.argv[1]
+          src = os.path.join(out, "base.apk")
+          dst = os.path.join(out, "unsigned.apk")
+          with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+              for item in zin.infolist():
+                  zout.writestr(item, zin.read(item.filename))
+              zout.write(os.path.join(out, "classes.dex"), "classes.dex")
+          PYEOF
+
+          # --- 6. Zipalign + ký + verify ---
+          "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
+          java -jar "$BT/lib/apksigner.jar" sign --ks "$KEYSTORE" --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$PASS" --key-pass "pass:$KEYPASS" --out "$OUT/tvlauncher.apk" "$OUT/aligned.apk"
+          java -jar "$BT/lib/apksigner.jar" verify "$OUT/tvlauncher.apk"
+
+          ls -lh "$OUT/tvlauncher.apk"
+          # Copy ra repo root để step upload artifact lấy dễ, bất kể PROJECT_DIR là gì
+          cp "$OUT/tvlauncher.apk" "$GITHUB_WORKSPACE/tvlauncher.apk"
+          echo "Built: $GITHUB_WORKSPACE/tvlauncher.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tvlauncher-apk
+          path: tvlauncher.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Release APK khi push tag v*
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tvlauncher.apk
+          generate_release_notes: true
