@@ -1,3 +1,35 @@
+name: Build TV Launcher APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: tv_launcher
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
@@ -61,56 +93,3 @@
             -cp "$PLAT" \
             -d "$OUT/classes" \
             @"$OUT/sources.txt"
-
-          echo "==> Convert class files to DEX"
-          mapfile -t CLASS_FILES < <(find "$OUT/classes" -name '*.class' -print)
-          java -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 \
-            --release \
-            --min-api 30 \
-            --lib "$PLAT" \
-            --output "$OUT" \
-            "${CLASS_FILES[@]}"
-
-          echo "==> Add classes.dex to APK"
-          python3 - "$OUT" <<'PY'
-          import os
-          import sys
-          import zipfile
-
-          out = sys.argv[1]
-          src = os.path.join(out, 'base.apk')
-          dst = os.path.join(out, 'unsigned.apk')
-          dex = os.path.join(out, 'classes.dex')
-
-          with zipfile.ZipFile(src, 'r') as zin, zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zout:
-              for item in zin.infolist():
-                  zout.writestr(item, zin.read(item.filename))
-              zout.write(dex, 'classes.dex')
-          PY
-
-          echo "==> Zipalign"
-          "$BT/zipalign" -f -p 4 \
-            "$OUT/unsigned.apk" \
-            "$OUT/aligned.apk"
-
-          echo "==> Sign APK"
-          java -jar "$BT/lib/apksigner.jar" sign \
-            --ks "$KEYSTORE" \
-            --ks-key-alias "$ALIAS" \
-            --ks-pass "pass:$PASS" \
-            --key-pass "pass:$PASS" \
-            --out "$OUT/tvlauncher.apk" \
-            "$OUT/aligned.apk"
-
-          echo "==> Verify APK"
-          java -jar "$BT/lib/apksigner.jar" verify --verbose "$OUT/tvlauncher.apk"
-
-          echo "APK created: $PWD/$OUT/tvlauncher.apk"
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tvlauncher-apk
-          path: tv_launcher/build/tvlauncher.apk
-          if-no-files-found: error
-          retention-days: 30
