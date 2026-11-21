@@ -1,0 +1,116 @@
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Check source layout
+        run: |
+          test -f AndroidManifest.xml
+          test -d src
+          test -d res
+          test -f vn-hero-sign.jks
+          find src -name '*.java' -print | sort
+
+      - name: Configure Firebase URL (optional)
+        if: ${{ secrets.FIREBASE_DB_URL != '' }}
+        env:
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path('src/vn/herotran/launcher/RemoteConfig.java')
+          s = p.read_text(encoding='utf-8')
+          url = os.environ['FIREBASE_DB_URL'].strip().rstrip('/')
+          s = s.replace(
+              'https://YOUR-PROJECT-default-rtdb.firebaseio.com',
+              url
+          )
+          p.write_text(s, encoding='utf-8')
+          print('Firebase URL configured.')
+          PY
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          BT="$SDKMANAGER_ROOT/build-tools/35.0.0"
+          PLAT="$SDKMANAGER_ROOT/platforms/android-35/android.jar"
+          OUT="build"
+          KEYSTORE="vn-hero-sign.jks"
+          ALIAS="vnhero"
+          PASS="android"
+
+          rm -rf "$OUT"
+          mkdir -p "$OUT/classes" "$OUT/compiled"
+
+          echo "==> Compile resources"
+          "$BT/aapt2" compile --dir res -o "$OUT/compiled/res.zip"
+
+          echo "==> Link resources + manifest"
+          "$BT/aapt2" link \
+            -o "$OUT/base.apk" \
+            -I "$PLAT" \
+            --manifest AndroidManifest.xml \
+            "$OUT/compiled/res.zip"
+
+          echo "==> Compile Java"
+          find src -name '*.java' -print | sort > "$OUT/sources.txt"
+          javac --release 8 -Xlint:-options \
+            -cp "$PLAT" \
+            -d "$OUT/classes" \
+            @"$OUT/sources.txt"
+
+          echo "==> Convert class files to DEX"
+          mapfile -t CLASS_FILES < <(find "$OUT/classes" -name '*.class' -print)
+          java -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 \
+            --release \
+            --min-api 30 \
+            --lib "$PLAT" \
+            --output "$OUT" \
+            "${CLASS_FILES[@]}"
+
+          echo "==> Add classes.dex to APK"
+          python3 - "$OUT" <<'PY'
+          import os
+          import sys
+          import zipfile
+
+          out = sys.argv[1]
+          src = os.path.join(out, 'base.apk')
+          dst = os.path.join(out, 'unsigned.apk')
+          dex = os.path.join(out, 'classes.dex')
+
+          with zipfile.ZipFile(src, 'r') as zin, zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zout:
+              for item in zin.infolist():
+                  zout.writestr(item, zin.read(item.filename))
+              zout.write(dex, 'classes.dex')
+          PY
+
+          echo "==> Zipalign"
+          "$BT/zipalign" -f -p 4 \
+            "$OUT/unsigned.apk" \
+            "$OUT/aligned.apk"
+
+          echo "==> Sign APK"
+          java -jar "$BT/lib/apksigner.jar" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$PASS" \
+            --key-pass "pass:$PASS" \
+            --out "$OUT/tvlauncher.apk" \
+            "$OUT/aligned.apk"
+
+          echo "==> Verify APK"
+          java -jar "$BT/lib/apksigner.jar" verify --verbose "$OUT/tvlauncher.apk"
+
+          echo "APK created: $PWD/$OUT/tvlauncher.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tvlauncher-apk
+          path: tv_launcher/build/tvlauncher.apk
+          if-no-files-found: error
+          retention-days: 30
