@@ -118,6 +118,7 @@ public class HomeActivity extends Activity {
     private final Map<String, String> appLabelCache = new HashMap<>();
     private final Map<String, Integer> drawableResCache = new HashMap<>();
     private boolean appsDirty = false;
+    private String movingPkg = null; // đang ở chế độ di chuyển vị trí app
     private View homeView;
     private View appsView;
     private LinearLayout homeAppRow;
@@ -287,6 +288,7 @@ public class HomeActivity extends Activity {
         handler.postDelayed(clockTick, 30_000);
         loadWeather();
         loadMarket();
+        scheduleNextMarketTick();
         startHomeWatcher();
         if (wifiIconView != null) {
             wifiIconView.setAlpha(isWifiConnected() ? 1.0f : 0.5f);
@@ -356,7 +358,32 @@ public class HomeActivity extends Activity {
     @Override
     public boolean dispatchKeyEvent(android.view.KeyEvent event) {
         int keyCode = event.getKeyCode();
+        if (movingPkg != null && keyCode != android.view.KeyEvent.KEYCODE_HOME) {
+            boolean handled = keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                    || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+                    || keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
+                    || keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                    || keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER
+                    || keyCode == android.view.KeyEvent.KEYCODE_ENTER
+                    || keyCode == android.view.KeyEvent.KEYCODE_BACK;
+            if (handled) {
+                if (event.getAction() == android.view.KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                    if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                        moveApp(movingPkg, -1);
+                    } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                        moveApp(movingPkg, 1);
+                    } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER
+                            || keyCode == android.view.KeyEvent.KEYCODE_ENTER
+                            || keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+                        movingPkg = null;
+                        toast("Đã lưu vị trí ứng dụng");
+                    }
+                }
+                return true;
+            }
+        }
         if (keyCode == android.view.KeyEvent.KEYCODE_HOME) {
+            movingPkg = null;
             if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
                 dismissAllOpenDialogs();
                 showTab(true);
@@ -1096,11 +1123,11 @@ public class HomeActivity extends Activity {
         fuelDiesel = text("--", 14, Color.WHITE, true);
         fuelDiesel.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
 
-        fuelCol.addView(financeRow("E5 RON 92", fuelE5, " đ/l"), withTop(new LinearLayout.LayoutParams(
+        fuelCol.addView(financeRow("E5 RON 92 mức 2", fuelE5, " đ/l"), withTop(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT), 9));
-        fuelCol.addView(financeRow("E10 RON 95-III", fuelE10, " đ/l"), withTop(new LinearLayout.LayoutParams(
+        fuelCol.addView(financeRow("E10 RON 95 mức 3", fuelE10, " đ/l"), withTop(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT), 7));
-        fuelCol.addView(financeRow("Diesel 0.05S", fuelDiesel, " đ/l"), withTop(new LinearLayout.LayoutParams(
+        fuelCol.addView(financeRow("Diesel 0,05S mức 2", fuelDiesel, " đ/l"), withTop(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT), 7));
         cols.addView(fuelCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.9f));
 
@@ -1131,7 +1158,7 @@ public class HomeActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         // Footer ghi nguồn và trạng thái cập nhật
-        marketFooter = text("Cập nhật hôm nay · Nguồn: VietNamNet", 9, Color.parseColor("#94A3B8"), false);
+        marketFooter = text("Cập nhật hôm nay · Nguồn: webgia.com", 9, Color.parseColor("#94A3B8"), false);
         marketFooter.setTypeface(null, Typeface.ITALIC);
         card.addView(marketFooter, withTop(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT), 2));
@@ -1172,7 +1199,7 @@ public class HomeActivity extends Activity {
         appsCountText = text(" (" + apps.size() + ")", 14, Color.parseColor("#90FFFFFF"), false);
         header.addView(appsCountText);
 
-        TextView hint = text(" · Giữ OK hoặc phím Menu để gỡ bỏ", 13, Color.parseColor("#70FFFFFF"), false);
+        TextView hint = text(" · Giữ OK hoặc phím Menu để mở tùy chọn", 13, Color.parseColor("#70FFFFFF"), false);
         header.addView(hint);
 
         header.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
@@ -1414,7 +1441,7 @@ public class HomeActivity extends Activity {
         return tile;
     }
 
-    /** Menu thao tác với app: Mở, Gỡ cài đặt, Thông tin app. */
+    /** Menu thao tác với app (giữ OK): Mở / Di chuyển / Ẩn / Gỡ cài đặt. */
     private void showAppOptions(final ResolveInfo info) {
         final PackageManager pm = getPackageManager();
         final String pkg = info.activityInfo.packageName;
@@ -1423,11 +1450,12 @@ public class HomeActivity extends Activity {
         final boolean isSelf = pkg.equals(getPackageName());
         final boolean isSettings = "com.xiaomi.mitv.settings".equals(pkg);
 
+        final boolean canUninstall = !isSelf && !isSystem && !isSettings;
         final List<String[]> options = new ArrayList<>();
         options.add(new String[] { "Mở ứng dụng", "ic_play" });
-        if (!isSelf && !isSystem && !isSettings) {
-            options.add(new String[] { "Gỡ cài đặt", "ic_trash" });
-        }
+        options.add(new String[] { "Di chuyển vị trí (trái / phải)", "ic_gear" });
+        options.add(new String[] { "Ẩn ứng dụng", "ic_widget" });
+        options.add(new String[] { "Gỡ cài đặt", "ic_trash" });
 
         android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(this);
         builder.setTitle(appName);
@@ -1482,8 +1510,17 @@ public class HomeActivity extends Activity {
                 String action = options.get(which)[0];
                 if ("Mở ứng dụng".equals(action)) {
                     launchPackage(pkg);
+                } else if (action.startsWith("Di chuyển")) {
+                    movingPkg = pkg;
+                    toast("Đang di chuyển " + appName + ": bấm ◀ ▶ để đổi vị trí, bấm OK hoặc Back để xong");
+                } else if ("Ẩn ứng dụng".equals(action)) {
+                    hideApp(pkg, appName);
                 } else if ("Gỡ cài đặt".equals(action)) {
-                    uninstallApp(pkg);
+                    if (canUninstall) {
+                        uninstallApp(pkg);
+                    } else {
+                        toast("Ứng dụng hệ thống hoặc của Launcher không thể gỡ cài đặt");
+                    }
                 }
             }
         });
@@ -1855,6 +1892,7 @@ public class HomeActivity extends Activity {
             { "Đổi mã PIN gỡ ứng dụng (mặc định: 0000)", "ic_gear" },
             { "Đổi hình nền của TV", "ic_wallpaper" },
             { "Chọn ngôn ngữ Voice Search của Google", "ic_language" },
+            { "Hiện lại ứng dụng đã ẩn", "ic_widget" },
     };
 
     /** Menu Cài đặt: các tùy chọn hệ thống và đổi hình nền. */
@@ -1916,6 +1954,9 @@ public class HomeActivity extends Activity {
                                 break;
                             case 7:
                                 showVoiceLanguageMenu();
+                                break;
+                            case 8:
+                                showHiddenAppsDialog();
                                 break;
                         }
                     }
@@ -2632,6 +2673,26 @@ public class HomeActivity extends Activity {
         });
     }
 
+    /** Làm mới giá xăng dầu / vàng vào đầu mỗi giờ (8h00, 9h00, 10h00...). */
+    private final Runnable marketTick = new Runnable() {
+        @Override
+        public void run() {
+            loadMarket();
+            scheduleNextMarketTick();
+        }
+    };
+
+    private void scheduleNextMarketTick() {
+        Calendar c = Calendar.getInstance();
+        c.add(Calendar.HOUR_OF_DAY, 1);
+        c.set(Calendar.MINUTE, 0);
+        c.set(Calendar.SECOND, 3);
+        c.set(Calendar.MILLISECOND, 0);
+        long delay = c.getTimeInMillis() - System.currentTimeMillis();
+        handler.removeCallbacks(marketTick);
+        handler.postDelayed(marketTick, Math.max(1000L, delay));
+    }
+
     private void loadMarket() {
         MarketService.load(new MarketService.Callback() {
             @Override
@@ -2716,7 +2777,133 @@ public class HomeActivity extends Activity {
             "vn.herotran.launcher"
     ));
 
+    private static final String PREF_HIDDEN_APPS = "hidden_apps";
+    private static final String PREF_APP_ORDER = "app_order";
+
+    private List<String> readPkgList(String key) {
+        List<String> out = new ArrayList<>();
+        String raw = getSharedPreferences("launcher_prefs", MODE_PRIVATE).getString(key, "");
+        if (raw == null) return out;
+        for (String part : raw.split(",")) {
+            String t = part.trim();
+            if (t.length() > 0 && !out.contains(t)) out.add(t);
+        }
+        return out;
+    }
+
+    private void writePkgList(String key, List<String> list) {
+        StringBuilder sb = new StringBuilder();
+        for (String p : list) {
+            if (sb.length() > 0) sb.append(',');
+            sb.append(p);
+        }
+        getSharedPreferences("launcher_prefs", MODE_PRIVATE).edit().putString(key, sb.toString()).apply();
+    }
+
+    /** Danh sách app hiển thị: bỏ app đã ẩn và xếp theo thứ tự người dùng đã chọn. */
     private List<ResolveInfo> loadLeanbackApps() {
+        List<ResolveInfo> all = loadAllLeanbackApps();
+        List<String> hidden = readPkgList(PREF_HIDDEN_APPS);
+        List<ResolveInfo> visible = new ArrayList<>();
+        for (ResolveInfo r : all) {
+            if (!hidden.contains(r.activityInfo.packageName)) {
+                visible.add(r);
+            }
+        }
+        final List<String> order = readPkgList(PREF_APP_ORDER);
+        if (!order.isEmpty()) {
+            Collections.sort(visible, new Comparator<ResolveInfo>() {
+                @Override
+                public int compare(ResolveInfo a, ResolveInfo b) {
+                    int ia = order.indexOf(a.activityInfo.packageName);
+                    int ib = order.indexOf(b.activityInfo.packageName);
+                    if (ia == -1 && ib == -1) return 0;
+                    if (ia == -1) return 1;
+                    if (ib == -1) return -1;
+                    return Integer.compare(ia, ib);
+                }
+            });
+        }
+        return visible;
+    }
+
+    /** Đổi vị trí app sang trái (-1) hoặc phải (+1) và lưu lại. */
+    private void moveApp(String pkg, int delta) {
+        List<String> pkgs = new ArrayList<>();
+        for (ResolveInfo r : apps) {
+            pkgs.add(r.activityInfo.packageName);
+        }
+        int i = pkgs.indexOf(pkg);
+        int j = i + delta;
+        if (i < 0 || j < 0 || j >= pkgs.size()) {
+            return;
+        }
+        Collections.swap(pkgs, i, j);
+        List<String> merged = new ArrayList<>(pkgs);
+        for (String o : readPkgList(PREF_APP_ORDER)) {
+            if (!merged.contains(o)) merged.add(o);
+        }
+        writePkgList(PREF_APP_ORDER, merged);
+        refreshApps();
+    }
+
+    private void hideApp(String pkg, String name) {
+        List<String> hidden = readPkgList(PREF_HIDDEN_APPS);
+        if (!hidden.contains(pkg)) hidden.add(pkg);
+        writePkgList(PREF_HIDDEN_APPS, hidden);
+        refreshApps();
+        toast("Đã ẩn " + name + " (hiện lại trong Cài đặt > Hiện lại ứng dụng đã ẩn)");
+    }
+
+    /** Hộp thoại chọn các ứng dụng đã ẩn để hiện lại. */
+    private void showHiddenAppsDialog() {
+        final PackageManager pm = getPackageManager();
+        List<ResolveInfo> all = loadAllLeanbackApps();
+        List<String> hidden = readPkgList(PREF_HIDDEN_APPS);
+        final List<String> pkgs = new ArrayList<>();
+        final List<CharSequence> names = new ArrayList<>();
+        for (ResolveInfo r : all) {
+            String p = r.activityInfo.packageName;
+            if (hidden.contains(p)) {
+                pkgs.add(p);
+                names.add(getAppLabel(r, pm));
+            }
+        }
+        if (pkgs.isEmpty()) {
+            toast("Không có ứng dụng nào đang bị ẩn");
+            return;
+        }
+        final boolean[] checked = new boolean[pkgs.size()];
+        showTracked(new android.app.AlertDialog.Builder(this)
+                .setTitle("Ứng dụng đã ẩn - chọn app cần hiện lại")
+                .setMultiChoiceItems(names.toArray(new CharSequence[0]), checked,
+                        new DialogInterface.OnMultiChoiceClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which, boolean isChecked) {
+                                checked[which] = isChecked;
+                            }
+                        })
+                .setPositiveButton("Hiện lại", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        List<String> h = readPkgList(PREF_HIDDEN_APPS);
+                        int n = 0;
+                        for (int i = 0; i < pkgs.size(); i++) {
+                            if (checked[i]) {
+                                h.remove(pkgs.get(i));
+                                n++;
+                            }
+                        }
+                        writePkgList(PREF_HIDDEN_APPS, h);
+                        refreshApps();
+                        toast(n > 0 ? "Đã hiện lại " + n + " ứng dụng" : "Chưa chọn ứng dụng nào");
+                    }
+                })
+                .setNegativeButton("Đóng", null)
+                .create());
+    }
+
+    private List<ResolveInfo> loadAllLeanbackApps() {
         final PackageManager pm = getPackageManager();
         String self = getPackageName();
 

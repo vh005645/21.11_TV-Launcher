@@ -296,6 +296,7 @@ public class RemoteService extends Service {
         worker.post(new Runnable() {
             @Override
             public void run() {
+                restoreVolumeAfterLock();
                 reportResult("TV đã tắt nguồn bằng remote - tự mở khóa");
                 publishStatus();
             }
@@ -309,6 +310,12 @@ public class RemoteService extends Service {
             if (boot != -1 && p.getInt("lock_boot", -2) != boot) {
                 // TV đã tắt rồi bật lại kể từ lúc khóa: trở lại bình thường
                 p.edit().putBoolean("is_locked", false).apply();
+                worker.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        restoreVolumeAfterLock();
+                    }
+                });
             }
         }
         if (p.getBoolean("is_locked", false)) {
@@ -638,6 +645,7 @@ public class RemoteService extends Service {
         }
         Log.i(TAG, "Lệnh: " + action);
 
+        c = null; // giải phóng bản sao lệnh (có thể chứa ảnh Base64) khỏi bộ nhớ
         String result;
         try {
             result = execute(action, payload);
@@ -645,8 +653,29 @@ public class RemoteService extends Service {
             Log.e(TAG, "Lệnh " + action + " lỗi", t);
             result = "Lỗi " + action + ": " + t.getMessage();
         }
+        if ("SHOW_IMAGE".equals(action)) {
+            clearCommandPayload(ts);
+        }
+        payload = null;
         reportResult(result);
         publishStatus();
+    }
+
+    /** Xóa ảnh Base64 khỏi node command trên Firebase (giữ nguyên timestamp để không chạy lại lệnh). */
+    private void clearCommandPayload(long ts) {
+        try {
+            FirebaseRest f = fb;
+            if (f == null) {
+                return;
+            }
+            JSONObject o = new JSONObject();
+            o.put("action", "NONE");
+            o.put("payload", "");
+            o.put("timestamp", ts);
+            f.put("devices/" + RemoteConfig.deviceId(this) + "/command", o.toString());
+        } catch (Throwable t) {
+            Log.w(TAG, "clearCommandPayload lỗi: " + t.getMessage());
+        }
     }
 
     private String execute(String action, String payload) throws Exception {
@@ -683,11 +712,58 @@ public class RemoteService extends Service {
 
     // --- KHÓA / MỞ KHÓA / TẮT NGUỒN
 
+    /** Tắt tiếng TV khi khóa (nhớ mức âm lượng cũ để trả lại sau khi mở khóa). */
+    private void muteForLock() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            SharedPreferences p = RemoteConfig.prefs(this);
+            int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+            if (cur > 0 && !p.contains("lock_prev_vol")) {
+                p.edit().putInt("lock_prev_vol", cur).apply();
+            }
+            try {
+                sh("cmd media_session volume --stream 3 --set 0");
+            } catch (Throwable t) {
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0);
+            }
+            try {
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0);
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "muteForLock lỗi: " + t.getMessage());
+        }
+    }
+
+    /** Trả lại âm lượng như trước khi khóa. */
+    private void restoreVolumeAfterLock() {
+        try {
+            SharedPreferences p = RemoteConfig.prefs(this);
+            int prev = p.getInt("lock_prev_vol", -1);
+            p.edit().remove("lock_prev_vol").apply();
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            try {
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0);
+            } catch (Throwable ignored) {
+            }
+            if (prev > 0) {
+                try {
+                    sh("cmd media_session volume --stream 3 --set " + prev);
+                } catch (Throwable t) {
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, prev, 0);
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "restoreVolumeAfterLock lỗi: " + t.getMessage());
+        }
+    }
+
     private String doLock() {
         RemoteConfig.prefs(this).edit()
                 .putBoolean("is_locked", true)
                 .putInt("lock_boot", currentBootCount())
                 .apply();
+        muteForLock();
         final boolean[] drawn = new boolean[1];
         runOnMainAndWait(new Runnable() {
             @Override
@@ -702,6 +778,7 @@ public class RemoteService extends Service {
 
     private String doUnlock() {
         RemoteConfig.prefs(this).edit().putBoolean("is_locked", false).apply();
+        restoreVolumeAfterLock();
         runOnMainAndWait(new Runnable() {
             @Override
             public void run() {
@@ -716,17 +793,24 @@ public class RemoteService extends Service {
         return "Đã mở khóa TV";
     }
 
+    /** Tắt TV như bấm nhanh phím nguồn trên remote: adb shell input keyevent 26 (KEYCODE_POWER). */
     private String doPowerOff() {
-        reportResult("Đang tắt nguồn TV...");
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isInteractive()) {
+                // Màn hình đã tắt: bấm phím nguồn lúc này sẽ BẬT TV lên, nên bỏ qua
+                return "TV đang tắt sẵn, không gửi lệnh nguồn";
+            }
+        } catch (Throwable ignored) {
+        }
+        reportResult("Đang tắt TV...");
         try {
             putStatusOffline();
-            sh("reboot -p");
-            Thread.sleep(1500);
-            sh("svc power shutdown");
+            sh("input keyevent 26");
         } catch (Throwable t) {
-            return "Tắt nguồn lỗi: " + t.getMessage();
+            return "Tắt TV lỗi: " + t.getMessage();
         }
-        return "Đã gửi lệnh tắt nguồn";
+        return "Đã gửi lệnh tắt TV (input keyevent 26)";
     }
 
     // --- ÂM LƯỢNG

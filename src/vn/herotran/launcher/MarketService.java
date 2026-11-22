@@ -8,54 +8,61 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Calendar;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Dịch vụ hợp nhất lấy cả Giá xăng dầu và Giá vàng hôm nay trong một lần quét RSS
- * VietNamNet (chuyên mục Kinh doanh). Có bộ nhớ đệm TTL và fallback dữ liệu mẫu độc lập cho từng cột.
+ * Lấy Giá xăng dầu (Petrolimex, Vùng 1) và Giá vàng hôm nay từ webgia.com.
+ * Dữ liệu được làm mới mỗi giờ vào đầu giờ (8h00, 9h00, 10h00...). Có dữ liệu mẫu khi hoàn toàn mất mạng.
  */
 public final class MarketService {
 
-    private static final String RSS_URL = "https://vietnamnet.vn/rss/kinh-doanh.rss";
-    private static final Pattern ITEM = Pattern.compile("<item>(.*?)</item>", Pattern.DOTALL);
-    private static final Pattern TITLE = Pattern.compile("<title>(?:<!\\[CDATA\\[)?(.*?)(?:\\]\\]>)?</title>", Pattern.DOTALL);
-    private static final Pattern LINK = Pattern.compile("<link>(.*?)</link>", Pattern.DOTALL);
-    private static final Pattern DATE_PATTERN = Pattern.compile("(\\d{1,2}/\\d{1,2})");
+    private static final String URL_FUEL = "https://webgia.com/gia-xang-dau/petrolimex/";
+    private static final String URL_SJC = "https://webgia.com/gia-vang/sjc/";
+    private static final String URL_BTMC = "https://webgia.com/gia-vang/bao-tin-minh-chau/";
+
+    private static final String SEP = "[\\s\\u00A0]+";
+    private static final String PRICE_FUEL = "(\\d{2}\\.\\d{3})";
+    private static final String PRICE_GOLD = "(\\d{1,2}\\.\\d{3}\\.\\d{3})";
+    private static final int FLAGS = Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE;
+
     private static final Pattern SCRIPT_STYLE_PATTERN = Pattern.compile("(?s)<script.*?</script>|<style.*?</style>");
     private static final Pattern HTML_TAG_PATTERN = Pattern.compile("<[^>]+>");
-    private static final Pattern WHITESPACE_PATTERN = Pattern.compile("\\s+");
+    private static final Pattern WHITESPACE_PATTERN = Pattern.compile("[\\s\\u00A0]+");
 
-    // Regex Giá xăng dầu (chặn không vượt qua dấu chấm câu để tránh match chéo sang loại xăng dầu khác)
-    private static final Pattern E5 = Pattern.compile(
-            "(?i)E5\\s?RON\\s?92[^.]{0,120}?(?:không cao hơn|tối đa|mức)\\s*(\\d{2}\\.\\d{3})");
-    private static final Pattern E10 = Pattern.compile(
-            "(?i)(?:E10\\s?)?RON\\s?95(?:-III)?[^.]{0,120}?(?:không cao hơn|tối đa|mức)\\s*(\\d{2}\\.\\d{3})");
-    private static final Pattern DIESEL = Pattern.compile(
-            "(?i)diesel\\s*0?\\.05S[^.]{0,120}?(?:không cao hơn|tối đa|mức)\\s*(\\d{2}\\.\\d{3})");
+    // ---- Giá xăng dầu (webgia dùng tên "mức", một số widget dùng tên cũ -III/-II) ----
+    private static final Pattern[] E5_PATTERNS = {
+            wg("Xăng E5 RON 92 mức 2", PRICE_FUEL),
+            wg("Xăng E5 RON 92-II", PRICE_FUEL)
+    };
+    private static final Pattern[] E10_PATTERNS = {
+            wg("Xăng E10 RON 95 mức 3", PRICE_FUEL),
+            wg("Xăng E10 RON 95-III", PRICE_FUEL)
+    };
+    private static final Pattern[] DIESEL_PATTERNS = {
+            wg("Dầu DO 0,05S mức 2", PRICE_FUEL),
+            wg("Dầu DO 0,05S-II", PRICE_FUEL)
+    };
 
-    // Regex Giá vàng:
-    // 1. Vàng miếng SJC
-    private static final Pattern SJC = Pattern.compile(
-            "(?i)(?:vàng miếng SJC|vàng miếng của Công ty Vàng bạc đá quý Sài Gòn \\(SJC\\)).{0,220}?(?:mức|lên|xuống|còn)\\s*([\\d,.]+)\\s*-\\s*([\\d,.]+)\\s*triệu",
-            Pattern.DOTALL);
-    // 2. Vàng nhẫn trơn Bảo Tín Minh Châu (BTMC) + fallback nhẫn 9999 Doji/SJC nếu bài viết thiếu BTMC
-    private static final Pattern NHAN_BTMC = Pattern.compile(
-            "(?i)(?:vàng nhẫn trơn (?:của|tại) Bảo Tín Minh Châu|Bảo Tín Minh Châu niêm yết vàng nhẫn).{0,220}?(?:mức|lên|xuống|còn)\\s*([\\d,.]+)\\s*-\\s*([\\d,.]+)\\s*triệu",
-            Pattern.DOTALL);
-    private static final Pattern NHAN_FALLBACK = Pattern.compile(
-            "(?i)(?:vàng nhẫn tròn ép vỉ 9999|vàng nhẫn 9999 (?:của|tại) (?:Tập đoàn )?Doji|vàng nhẫn (?:SJC )?loại 1-5 chỉ).{0,220}?(?:mức|lên|xuống|còn)\\s*([\\d,.]+)\\s*-\\s*([\\d,.]+)\\s*triệu",
-            Pattern.DOTALL);
-    // 3. Vàng thế giới (Kitco giao ngay USD/ounce)
+    // ---- Giá vàng (webgia tính đồng/chỉ -> nhân 10 thành đồng/lượng) ----
+    private static final Pattern SJC_MIENG = wg("Vàng SJC 1L, 10L, 1KG", PRICE_GOLD + SEP + PRICE_GOLD);
+    private static final Pattern NHAN_BTMC = wg("Nhẫn tròn trơn 999.9 (24k)", PRICE_GOLD + SEP + PRICE_GOLD);
+    private static final Pattern NHAN_SJC = wg("Vàng nhẫn SJC 99,99% 1 chỉ, 2 chỉ, 5 chỉ", PRICE_GOLD + SEP + PRICE_GOLD);
+
+    // Ô "Giá vàng thế giới $3,524.80" (có trên mọi trang webgia)
     private static final Pattern WORLD_GOLD = Pattern.compile(
-            "(?i)(?:giá vàng (?:thế giới )?giao ngay|Kitco, giá vàng thế giới).{0,180}?(?:mức|vùng|đạt|lên|xuống)\\s*([\\d.,]+)\\s*USD/ounce",
-            Pattern.DOTALL);
+            "Giá" + SEP + "vàng" + SEP + "thế" + SEP + "giới[\\s\\u00A0]*\\$[\\s\\u00A0]*([\\d,]+\\.\\d+)", FLAGS);
 
-    private static final long DATA_TTL_MS = 2 * 60 * 60 * 1000L; // 2 giờ cho dữ liệu thật
-    private static final long SAMPLE_RETRY_MS = 2 * 60 * 1000L;  // 2 phút nếu dữ liệu mẫu
+    // "Cập nhật lúc 07:40:05 22/11/2026"
+    private static final Pattern UPDATED_DATE = Pattern.compile(
+            "Cập" + SEP + "nhật" + SEP + "lúc" + SEP + "\\d{1,2}:\\d{2}(?::\\d{2})?" + SEP + "(\\d{1,2}/\\d{1,2})/\\d{4}", FLAGS);
+
+    private static final long SAMPLE_RETRY_MS = 2 * 60 * 1000L; // 2 phút nếu đang là dữ liệu mẫu
 
     private static volatile Market cachedMarket;
+    private static volatile long cachedHourKey = -1;
     private static volatile long lastFetchTime = 0;
     private static final AtomicBoolean isFetching = new AtomicBoolean(false);
 
@@ -77,23 +84,34 @@ public final class MarketService {
         public String worldGold;
 
         // Thông tin chân thẻ chung
-        public String date;      // ví dụ "28/10"
-        public String source;    // "VietNamNet" hoặc "dữ liệu mẫu"
-        public boolean sample;   // true nếu cả 2 cột đều đang là dữ liệu mẫu
+        public String date;      // ví dụ "22/11"
+        public String source;    // "webgia.com" hoặc "dữ liệu mẫu"
+        public boolean sample;   // true nếu đang là dữ liệu mẫu
     }
 
     private MarketService() {
     }
 
-    /** Gọi trên luồng nền (có kiểm tra cache TTL), trả về kết quả hợp nhất trên luồng chính. */
+    /** Khóa theo giờ hiện tại (ngày + giờ) - dữ liệu coi là còn mới trong cùng một giờ. */
+    private static long currentHourKey() {
+        Calendar c = Calendar.getInstance();
+        return c.get(Calendar.YEAR) * 1000000L + c.get(Calendar.DAY_OF_YEAR) * 100L + c.get(Calendar.HOUR_OF_DAY);
+    }
+
+    /** Gọi từ luồng chính; tải trên luồng nền (nếu cache chưa thuộc giờ hiện tại) và trả kết quả về luồng chính. */
     public static void load(final Callback callback) {
         final Handler main = new Handler(Looper.getMainLooper());
         final Market currentCache = cachedMarket;
         final long now = SystemClock.elapsedRealtime();
 
         if (currentCache != null) {
-            long ttl = currentCache.sample ? SAMPLE_RETRY_MS : DATA_TTL_MS;
-            if ((now - lastFetchTime) < ttl) {
+            boolean fresh;
+            if (currentCache.sample) {
+                fresh = (now - lastFetchTime) < SAMPLE_RETRY_MS;
+            } else {
+                fresh = cachedHourKey == currentHourKey();
+            }
+            if (fresh) {
                 main.post(new Runnable() {
                     @Override
                     public void run() {
@@ -120,15 +138,23 @@ public final class MarketService {
             @Override
             public void run() {
                 Market result;
+                boolean real = true;
                 try {
                     result = fetch();
                 } catch (Exception e) {
+                    real = false;
                     result = (cachedMarket != null && !cachedMarket.sample) ? cachedMarket : sample();
                 } finally {
                     isFetching.set(false);
                 }
                 cachedMarket = result;
                 lastFetchTime = SystemClock.elapsedRealtime();
+                // Lấy được dữ liệu thật: khóa theo giờ; lỗi mạng: thử lại sau 2 phút
+                cachedHourKey = (real && !result.sample) ? currentHourKey() : -1;
+                if (!real && !result.sample) {
+                    // giữ dữ liệu cũ nhưng thử lại sớm
+                    cachedHourKey = -1;
+                }
                 final Market out = result;
                 main.post(new Runnable() {
                     @Override
@@ -140,105 +166,149 @@ public final class MarketService {
         }).start();
     }
 
+    // ------------------------------------------------------------------ tải + phân tích
+
     private static Market fetch() throws Exception {
-        String rss = get(RSS_URL);
-        Matcher items = ITEM.matcher(rss);
+        String fuelText = fetchText(URL_FUEL);
+        String sjcText = fetchText(URL_SJC);
+        String btmcText = fetchText(URL_BTMC);
 
-        String e5 = null, e10 = null, diesel = null, fuelDate = "";
-        String sjcBuy = null, sjcSell = null, nhanBuy = null, nhanSell = null, worldGold = null, goldDate = "";
+        // Giá xăng dầu: ưu tiên trang Petrolimex, dự phòng bằng ô widget xăng dầu trên các trang vàng
+        String e5 = firstOf(E5_PATTERNS, fuelText, sjcText, btmcText);
+        String e10 = firstOf(E10_PATTERNS, fuelText, sjcText, btmcText);
+        String diesel = firstOf(DIESEL_PATTERNS, fuelText, sjcText, btmcText);
 
-        while (items.find() && (e5 == null || sjcBuy == null)) {
-            String item = items.group(1);
-            String title = firstGroup(TITLE, item);
-            if (title == null) continue;
+        // Giá vàng
+        String[] sjc = goldPair(SJC_MIENG, sjcText);
+        String[] nhan = goldPair(NHAN_BTMC, btmcText);
+        if (nhan == null) {
+            nhan = goldPair(NHAN_SJC, sjcText);
+        }
+        String world = worldGold(sjcText, fuelText, btmcText);
 
-            if (e5 == null && title.contains("Giá xăng dầu hôm nay")) {
-                String link = firstGroup(LINK, item);
-                if (link != null) {
-                    try {
-                        String text = stripHtml(get(link.trim()));
-                        String pE5 = firstGroup(E5, text);
-                        String pE10 = firstGroup(E10, text);
-                        String pDiesel = firstGroup(DIESEL, text);
-                        if (pE5 != null && pE10 != null && pDiesel != null) {
-                            e5 = pE5;
-                            e10 = pE10;
-                            diesel = pDiesel;
-                            fuelDate = dateFromTitle(title);
-                        }
-                    } catch (Exception ignored) {
-                    }
-                }
-            } else if (sjcBuy == null && title.contains("Giá vàng hôm nay")) {
-                String link = firstGroup(LINK, item);
-                if (link != null) {
-                    try {
-                        String text = stripHtml(get(link.trim()));
-                        Matcher mSjc = SJC.matcher(text);
-                        Matcher mNhan = NHAN_BTMC.matcher(text);
-                        if (!mNhan.find()) {
-                            mNhan = NHAN_FALLBACK.matcher(text);
-                        } else {
-                            mNhan.reset();
-                        }
-                        Matcher mWorld = WORLD_GOLD.matcher(text);
-                        if (mSjc.find() && mNhan.find()) {
-                            sjcBuy = mSjc.group(1);
-                            sjcSell = mSjc.group(2);
-                            nhanBuy = mNhan.group(1);
-                            nhanSell = mNhan.group(2);
-                            if (mWorld.find()) {
-                                worldGold = mWorld.group(1);
-                            }
-                            goldDate = dateFromTitle(title);
-                        }
-                    } catch (Exception ignored) {
-                    }
-                }
-            }
+        boolean gotFuel = e5 != null || e10 != null || diesel != null;
+        boolean gotGold = sjc != null || nhan != null;
+        if (!gotFuel && !gotGold) {
+            throw new IllegalStateException("Không đọc được giá từ webgia.com");
         }
 
-        if (e5 == null && sjcBuy == null) {
-            throw new IllegalStateException("Không tìm thấy bài giá xăng hoặc giá vàng trong RSS");
-        }
-
-        Market def = (cachedMarket != null) ? cachedMarket : sample();
+        Market def = (cachedMarket != null && !cachedMarket.sample) ? cachedMarket : sample();
         Market m = new Market();
-        m.e5 = (e5 != null) ? e5 : def.e5;
-        m.e10 = (e10 != null) ? e10 : def.e10;
-        m.diesel = (diesel != null) ? diesel : def.diesel;
-        m.sjcBuy = (sjcBuy != null) ? sjcBuy : def.sjcBuy;
-        m.sjcSell = (sjcSell != null) ? sjcSell : def.sjcSell;
-        m.nhanBuy = (nhanBuy != null) ? nhanBuy : def.nhanBuy;
-        m.nhanSell = (nhanSell != null) ? nhanSell : def.nhanSell;
-        m.worldGold = (worldGold != null) ? worldGold : def.worldGold;
+        m.e5 = e5 != null ? e5 : def.e5;
+        m.e10 = e10 != null ? e10 : def.e10;
+        m.diesel = diesel != null ? diesel : def.diesel;
+        m.sjcBuy = sjc != null ? sjc[0] : def.sjcBuy;
+        m.sjcSell = sjc != null ? sjc[1] : def.sjcSell;
+        m.nhanBuy = nhan != null ? nhan[0] : def.nhanBuy;
+        m.nhanSell = nhan != null ? nhan[1] : def.nhanSell;
+        m.worldGold = world != null ? world : def.worldGold;
 
-        m.date = !goldDate.isEmpty() ? goldDate : (!fuelDate.isEmpty() ? fuelDate : def.date);
-        m.source = "VietNamNet";
+        String date = firstGroup(UPDATED_DATE, sjcText);
+        if (date == null) date = firstGroup(UPDATED_DATE, fuelText);
+        if (date == null) date = todayDdMm();
+        m.date = date;
+        m.source = "webgia.com";
         m.sample = false;
         return m;
     }
 
-    /** Dữ liệu mẫu khi hoàn toàn mất mạng. */
+    /** Dữ liệu mẫu khi hoàn toàn mất mạng (giá ngày 22/11/2026). */
     public static Market sample() {
         Market m = new Market();
         m.sample = true;
         m.date = "--/--";
         m.source = "dữ liệu mẫu";
-        m.e5 = "26.027";
-        m.e10 = "25.734";
-        m.diesel = "30.246";
-        m.sjcBuy = "139,7";
-        m.sjcSell = "142,7";
-        m.nhanBuy = "137,4";
-        m.nhanSell = "141,4";
-        m.worldGold = "4.058,9";
+        m.e5 = "18.570";
+        m.e10 = "19.100";
+        m.diesel = "26.340";
+        m.sjcBuy = "128,5";
+        m.sjcSell = "133,5";
+        m.nhanBuy = "128,3";
+        m.nhanSell = "133,3";
+        m.worldGold = "3.524,8";
         return m;
     }
 
-    private static String dateFromTitle(String title) {
-        Matcher m = DATE_PATTERN.matcher(title);
-        return m.find() ? m.group(1) : "";
+    // ------------------------------------------------------------------ tiện ích
+
+    /** Tạo regex từ một cụm chữ (khoảng trắng linh hoạt) + phần giá phía sau. */
+    private static Pattern wg(String phrase, String tail) {
+        String[] words = phrase.split(" ");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < words.length; i++) {
+            if (i > 0) sb.append(SEP);
+            sb.append(Pattern.quote(words[i]));
+        }
+        sb.append(SEP).append(tail);
+        return Pattern.compile(sb.toString(), FLAGS);
+    }
+
+    private static String firstOf(Pattern[] patterns, String... texts) {
+        for (String text : texts) {
+            if (text == null) continue;
+            for (Pattern p : patterns) {
+                String v = firstGroup(p, text);
+                if (v != null) return v;
+            }
+        }
+        return null;
+    }
+
+    /** Đọc cặp giá mua/bán (đồng/chỉ) -> {"128,5", "133,5"} triệu đồng/lượng. */
+    private static String[] goldPair(Pattern p, String text) {
+        if (text == null) return null;
+        Matcher m = p.matcher(text);
+        if (!m.find()) return null;
+        try {
+            long buy = Long.parseLong(m.group(1).replace(".", "")) * 10L;
+            long sell = Long.parseLong(m.group(2).replace(".", "")) * 10L;
+            if (buy <= 0 || sell <= 0) return null;
+            return new String[] { formatTrieu(buy), formatTrieu(sell) };
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 128500000 -> "128,5" */
+    private static String formatTrieu(long dong) {
+        long t = Math.round(dong / 100000.0);
+        return (t / 10) + "," + (t % 10);
+    }
+
+    private static String worldGold(String... texts) {
+        for (String text : texts) {
+            if (text == null) continue;
+            String raw = firstGroup(WORLD_GOLD, text);
+            if (raw == null) continue;
+            try {
+                double v = Double.parseDouble(raw.replace(",", ""));
+                long scaled = Math.round(v * 10);
+                String ip = Long.toString(scaled / 10);
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < ip.length(); i++) {
+                    if (i > 0 && (ip.length() - i) % 3 == 0) sb.append('.');
+                    sb.append(ip.charAt(i));
+                }
+                return sb.append(',').append(scaled % 10).toString();
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static String todayDdMm() {
+        Calendar c = Calendar.getInstance();
+        int d = c.get(Calendar.DAY_OF_MONTH);
+        int mo = c.get(Calendar.MONTH) + 1;
+        return (d < 10 ? "0" : "") + d + "/" + (mo < 10 ? "0" : "") + mo;
+    }
+
+    private static String fetchText(String address) {
+        try {
+            return stripHtml(get(address));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static String stripHtml(String html) {
@@ -248,19 +318,25 @@ public final class MarketService {
     }
 
     private static String firstGroup(Pattern p, String s) {
+        if (s == null) return null;
         Matcher m = p.matcher(s);
         return m.find() ? m.group(1).trim() : null;
     }
 
     private static String get(String address) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(address).openConnection();
-        conn.setConnectTimeout(8000);
-        conn.setReadTimeout(8000);
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(12000);
+        conn.setRequestProperty("User-Agent",
+                "Mozilla/5.0 (Linux; Android 11; TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36");
+        conn.setRequestProperty("Accept-Language", "vi-VN,vi;q=0.9");
         try {
+            if (conn.getResponseCode() != 200) {
+                throw new java.io.IOException("HTTP " + conn.getResponseCode());
+            }
             InputStream in = conn.getInputStream();
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
+            byte[] buf = new byte[8192];
             int r;
             while ((r = in.read(buf)) != -1) {
                 out.write(buf, 0, r);
@@ -272,4 +348,3 @@ public final class MarketService {
         }
     }
 }
-
