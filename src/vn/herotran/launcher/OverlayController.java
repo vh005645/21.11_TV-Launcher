@@ -44,6 +44,7 @@ public class OverlayController {
     private Bitmap imageBitmap;
 
     private volatile boolean lockShown;
+    private volatile boolean messageShown;
     private volatile boolean imageShown;
 
     private final Runnable hideMessageRunnable = new Runnable() {
@@ -69,6 +70,10 @@ public class OverlayController {
 
     public boolean isLockShown() {
         return lockShown;
+    }
+
+    public boolean isMessageShown() {
+        return messageShown;
     }
 
     public boolean isImageShown() {
@@ -146,17 +151,17 @@ public class OverlayController {
 
     // ------------------------------------------------------------------ TIN NHẮN
 
+    /** Tin nhắn phủ 100% màn hình TV (giữ khung viền vàng). Đóng bằng BACK/HOME hoặc tự tắt sau durationMs. */
     public boolean showMessage(String text, long durationMs) {
         if (!canDraw()) {
             return false;
         }
         hideMessage();
         try {
-            int screenW = ctx.getResources().getDisplayMetrics().widthPixels;
-
             LinearLayout box = new LinearLayout(ctx);
             box.setOrientation(LinearLayout.VERTICAL);
-            box.setPadding(dp(32), dp(24), dp(32), dp(28));
+            box.setGravity(Gravity.CENTER);
+            box.setPadding(dp(48), dp(32), dp(48), dp(32));
             GradientDrawable bg = new GradientDrawable();
             bg.setColor(Color.parseColor("#F2101828"));
             bg.setCornerRadius(dp(20));
@@ -167,7 +172,7 @@ public class OverlayController {
             title.setText("TIN NHẮN TỪ ĐIỆN THOẠI");
             title.setTextColor(Color.parseColor("#FFC107"));
             title.setTypeface(Typeface.DEFAULT_BOLD);
-            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
             title.setGravity(Gravity.CENTER);
             box.addView(title, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -176,24 +181,40 @@ public class OverlayController {
             msg.setText(text);
             msg.setTextColor(Color.WHITE);
             msg.setTypeface(Typeface.DEFAULT_BOLD);
-            msg.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44);
+            msg.setTextSize(TypedValue.COMPLEX_UNIT_SP, 56);
             msg.setGravity(Gravity.CENTER);
-            msg.setMaxLines(6);
-            msg.setPadding(0, dp(16), 0, 0);
+            msg.setMaxLines(8);
+            msg.setPadding(0, dp(24), 0, 0);
             box.addView(msg, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    (int) (screenW * 0.8f),
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                    PixelFormat.TRANSLUCENT);
-            lp.gravity = Gravity.CENTER;
-            wm.addView(box, lp);
+            box.setFocusable(true);
+            box.setFocusableInTouchMode(true);
+            box.setOnKeyListener(new View.OnKeyListener() {
+                @Override
+                public boolean onKey(View v, int keyCode, KeyEvent event) {
+                    if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_HOME) {
+                        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                            main.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    hideMessage();
+                                }
+                            });
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+            });
+
+            int flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+            wm.addView(box, fullParams(flags));
             messageView = box;
+            messageShown = true;
+            box.requestFocus();
             main.postDelayed(hideMessageRunnable, durationMs);
             playBeep();
             return true;
@@ -205,6 +226,7 @@ public class OverlayController {
 
     public void hideMessage() {
         main.removeCallbacks(hideMessageRunnable);
+        messageShown = false;
         if (messageView != null) {
             try {
                 wm.removeView(messageView);

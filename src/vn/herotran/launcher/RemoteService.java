@@ -11,6 +11,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.AudioManager;
@@ -75,12 +76,17 @@ public class RemoteService extends Service {
         int code = event.getKeyCode();
         int action = event.getAction();
 
-        // Đang khóa: chặn toàn bộ phím
+        // Phím nguồn luôn được để hệ thống xử lý (tắt TV bằng remote = mở khóa)
+        if (code == KeyEvent.KEYCODE_POWER || code == KeyEvent.KEYCODE_SLEEP || code == KeyEvent.KEYCODE_WAKEUP
+                || code == KeyEvent.KEYCODE_TV_POWER || code == KeyEvent.KEYCODE_STB_POWER) {
+            return false;
+        }
+        // Đang khóa: chặn toàn bộ các phím còn lại
         if (s != null && s.isLocked()) {
             return true;
         }
-        // Đang hiện ảnh từ điện thoại: BACK/HOME đóng ảnh
-        if (s != null && s.overlay != null && s.overlay.isImageShown()
+        // Đang hiện ảnh hoặc tin nhắn: BACK/HOME để đóng
+        if (s != null && s.overlay != null && (s.overlay.isImageShown() || s.overlay.isMessageShown())
                 && (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_HOME)) {
             if (action == KeyEvent.ACTION_DOWN) {
                 s.main.post(new Runnable() {
@@ -88,8 +94,12 @@ public class RemoteService extends Service {
                     public void run() {
                         RemoteService x = sInstance;
                         if (x != null) {
+                            boolean wasImage = x.overlay.isImageShown();
+                            x.overlay.hideMessage();
                             x.overlay.hideImage();
-                            x.onImageClosed();
+                            if (wasImage) {
+                                x.onImageClosed();
+                            }
                         }
                     }
                 });
@@ -266,8 +276,41 @@ public class RemoteService extends Service {
 
     // ------------------------------------------------------------------ khôi phục sau khởi động lại
 
+    private int currentBootCount() {
+        try {
+            return Settings.Global.getInt(getContentResolver(), "boot_count", -1);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** Người dùng bấm phím nguồn trên remote (TV tắt màn hình) trong lúc đang khóa -> mở khóa. */
+    private void autoUnlockByPower() {
+        RemoteConfig.prefs(this).edit().putBoolean("is_locked", false).apply();
+        main.post(new Runnable() {
+            @Override
+            public void run() {
+                overlay.hideLock();
+            }
+        });
+        worker.post(new Runnable() {
+            @Override
+            public void run() {
+                reportResult("TV đã tắt nguồn bằng remote - tự mở khóa");
+                publishStatus();
+            }
+        });
+    }
+
     private void restoreState() {
         final SharedPreferences p = RemoteConfig.prefs(this);
+        if (p.getBoolean("is_locked", false)) {
+            int boot = currentBootCount();
+            if (boot != -1 && p.getInt("lock_boot", -2) != boot) {
+                // TV đã tắt rồi bật lại kể từ lúc khóa: trở lại bình thường
+                p.edit().putBoolean("is_locked", false).apply();
+            }
+        }
         if (p.getBoolean("is_locked", false)) {
             main.post(new Runnable() {
                 @Override
@@ -301,6 +344,7 @@ public class RemoteService extends Service {
                 if (!isAdbConnected()) {
                     connectAdbAsync(false);
                 }
+                maintainSystem();
                 publishStatus();
             } catch (Throwable t) {
                 Log.w(TAG, "heartbeat lỗi", t);
@@ -308,6 +352,59 @@ public class RemoteService extends Service {
             worker.postDelayed(this, HEARTBEAT_MS);
         }
     };
+
+    /**
+     * Tự duy trì các cài đặt hệ thống (chạy mỗi 30 giây và ngay khi service khởi động lại,
+     * kể cả sau khi xóa đa nhiệm hoặc tắt/bật TV):
+     * - tự cấp lại WRITE_SECURE_SETTINGS và quyền Overlay qua Local ADB nếu bị mất
+     * - bật lại ADB và dịch vụ trợ năng (accessibility) nếu hệ thống đã tắt
+     * - dựng lại lớp phủ khóa nếu TV đang ở trạng thái khóa
+     */
+    private void maintainSystem() {
+        String pkg = getPackageName();
+        try {
+            if (adb != null && adb.isConnected()) {
+                if (checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS")
+                        != PackageManager.PERMISSION_GRANTED) {
+                    try {
+                        adb.shell("pm grant " + pkg + " android.permission.WRITE_SECURE_SETTINGS", 10000);
+                    } catch (IOException e) {
+                        Log.w(TAG, "Tự cấp WRITE_SECURE_SETTINGS lỗi: " + e.getMessage());
+                    }
+                }
+                if (overlay != null && !overlay.canDraw()) {
+                    try {
+                        adb.shell("cmd appops set " + pkg + " SYSTEM_ALERT_WINDOW allow", 10000);
+                    } catch (IOException e) {
+                        Log.w(TAG, "Tự cấp Overlay lỗi: " + e.getMessage());
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "maintainSystem(grant) lỗi", t);
+        }
+        try {
+            AdbHelper.ensureAdbEnabled(this, false);
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (VoiceAccessibilityService.getInstance() == null) {
+                VoiceHelper.ensureVoiceConfigured(this);
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (isLocked() && overlay != null && !overlay.isLockShown() && overlay.canDraw()) {
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        overlay.showLock();
+                    }
+                });
+            }
+        } catch (Throwable ignored) {
+        }
+    }
 
     /** Kết nối ADB ở luồng riêng. userInitiated=true: chờ tới 70s cho người dùng bấm Allow. */
     public void connectAdbAsync(final boolean userInitiated) {
@@ -370,7 +467,7 @@ public class RemoteService extends Service {
     /** Cấp quyền SYSTEM_ALERT_WINDOW cho chính app qua ADB. */
     public boolean grantOverlayViaAdb() {
         try {
-            sh("appops set " + getPackageName() + " SYSTEM_ALERT_WINDOW allow");
+            sh("cmd appops set " + getPackageName() + " SYSTEM_ALERT_WINDOW allow");
             Thread.sleep(500);
         } catch (Throwable t) {
             Log.w(TAG, "grantOverlayViaAdb lỗi", t);
@@ -587,7 +684,10 @@ public class RemoteService extends Service {
     // --- KHÓA / MỞ KHÓA / TẮT NGUỒN
 
     private String doLock() {
-        RemoteConfig.prefs(this).edit().putBoolean("is_locked", true).apply();
+        RemoteConfig.prefs(this).edit()
+                .putBoolean("is_locked", true)
+                .putInt("lock_boot", currentBootCount())
+                .apply();
         final boolean[] drawn = new boolean[1];
         runOnMainAndWait(new Runnable() {
             @Override
@@ -595,18 +695,13 @@ public class RemoteService extends Service {
                 drawn[0] = overlay.showLock();
             }
         });
-        String adbNote = "";
-        try {
-            sh("input keyevent 223"); // SLEEP
-        } catch (Throwable t) {
-            adbNote = " (ADB lỗi: " + t.getMessage() + ")";
-        }
-        return (drawn[0] ? "Đã khóa TV" : "Đã khóa TV nhưng THIẾU quyền Overlay") + adbNote;
+        return drawn[0]
+                ? "Đã khóa TV (chữ \"Tắt TV ngay !\" luôn hiện; bấm nguồn trên remote hoặc dùng app để mở khóa)"
+                : "Đã khóa TV nhưng THIẾU quyền Overlay (đang tự cấp qua ADB, thử lại sau ~30 giây)";
     }
 
     private String doUnlock() {
         RemoteConfig.prefs(this).edit().putBoolean("is_locked", false).apply();
-        worker.removeCallbacks(relock);
         runOnMainAndWait(new Runnable() {
             @Override
             public void run() {
@@ -686,7 +781,7 @@ public class RemoteService extends Service {
         runOnMainAndWait(new Runnable() {
             @Override
             public void run() {
-                ok[0] = overlay.showMessage(text, 20000L);
+                ok[0] = overlay.showMessage(text, 40000L);
             }
         });
         return ok[0] ? "Đã hiện tin nhắn trên TV" : "Không hiện được tin nhắn (thiếu quyền Overlay?)";
@@ -900,41 +995,31 @@ public class RemoteService extends Service {
         });
     }
 
-    // ------------------------------------------------------------------ khóa: tự ngủ lại khi có người bấm đánh thức
-
-    private final Runnable relock = new Runnable() {
-        @Override
-        public void run() {
-            if (isLocked()) {
-                try {
-                    sh("input keyevent 223");
-                } catch (Throwable ignored) {
-                }
-            }
-        }
-    };
+    // ------------------------------------------------------------------ nghe bật/tắt màn hình
 
     private void registerScreenReceiver() {
         screenReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 String a = intent == null ? null : intent.getAction();
-                if (Intent.ACTION_SCREEN_ON.equals(a) && isLocked() && worker != null) {
-                    // Đang khóa mà màn hình bật lại: giữ lớp phủ, 8 giây sau cho ngủ lại
-                    final RemoteService self = RemoteService.this;
+                if (a == null || worker == null) {
+                    return;
+                }
+                if (Intent.ACTION_SCREEN_OFF.equals(a) && isLocked()) {
+                    autoUnlockByPower();
+                } else if (Intent.ACTION_SCREEN_ON.equals(a) && isLocked()) {
                     main.post(new Runnable() {
                         @Override
                         public void run() {
-                            self.overlay.showLock();
+                            overlay.showLock();
                         }
                     });
-                    worker.removeCallbacks(relock);
-                    worker.postDelayed(relock, 8000L);
                 }
             }
         };
         IntentFilter f = new IntentFilter();
         f.addAction(Intent.ACTION_SCREEN_ON);
+        f.addAction(Intent.ACTION_SCREEN_OFF);
         registerReceiver(screenReceiver, f);
     }
 

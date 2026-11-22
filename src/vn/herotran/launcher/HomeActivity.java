@@ -808,11 +808,11 @@ public class HomeActivity extends Activity {
         centerClock.setFocusable(false);
         centerClock.setClickable(false);
 
-        clockTime = text("", 20, Color.WHITE, true);
-        clockDate = text("", 20, Color.WHITE, true);
+        clockTime = text("", 40, Color.WHITE, true);
+        clockDate = text("", 40, Color.WHITE, true);
         centerClock.addView(clockTime);
 
-        TextView dot = text("  ·  ", 18, Color.parseColor("#E0FFFFFF"), true);
+        TextView dot = text("  ·  ", 36, Color.parseColor("#E0FFFFFF"), true);
         centerClock.addView(dot);
 
         centerClock.addView(clockDate);
@@ -820,7 +820,7 @@ public class HomeActivity extends Activity {
         FrameLayout.LayoutParams lpCenter = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lpCenter.gravity = Gravity.CENTER_HORIZONTAL | Gravity.TOP;
-        lpCenter.topMargin = dp(9);
+        lpCenter.topMargin = dp(2);
         bar.addView(centerClock, lpCenter);
 
         // 3. Cụm bên phải: Cụm trạng thái (Icon công cụ + Badge RAM/CPU bên dưới icon)
@@ -1229,7 +1229,7 @@ public class HomeActivity extends Activity {
         if (appsGrid == null)
             return;
         appsGrid.removeAllViews();
-        int perRow = 5;
+        int perRow = 7;
         for (int start = 0; start < apps.size(); start += perRow) {
             LinearLayout row = new LinearLayout(this);
             row.setClipChildren(false);
@@ -1360,20 +1360,20 @@ public class HomeActivity extends Activity {
             LinearLayout iconLayout = new LinearLayout(this);
             iconLayout.setOrientation(LinearLayout.VERTICAL);
             iconLayout.setGravity(Gravity.CENTER);
-            iconLayout.setPadding(dp(6), dp(4), dp(6), dp(4));
+            iconLayout.setPadding(dp(4), dp(3), dp(4), dp(3));
 
             ImageView icon = new ImageView(this);
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
             icon.setImageDrawable(info.loadIcon(pm));
-            iconLayout.addView(icon, sized(42, 42));
+            iconLayout.addView(icon, sized(29, 29));
 
-            TextView label = text(getAppLabel(info, pm), 11, Color.WHITE, true);
+            TextView label = text(getAppLabel(info, pm), 9, Color.WHITE, true);
             label.setSingleLine(true);
             label.setEllipsize(TextUtils.TruncateAt.END);
             label.setGravity(Gravity.CENTER);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.topMargin = dp(4);
+            lp.topMargin = dp(3);
             iconLayout.addView(label, lp);
 
             box.addView(iconLayout, new FrameLayout.LayoutParams(
@@ -1671,8 +1671,8 @@ public class HomeActivity extends Activity {
         }
     }
 
-    private static final int TILE_W = 140;
-    private static final int TILE_H = 79;
+    private static final int TILE_W = 98;
+    private static final int TILE_H = 55;
 
     private LinearLayout addAppCircle() {
         LinearLayout tile = new LinearLayout(this);
@@ -1680,7 +1680,7 @@ public class HomeActivity extends Activity {
         tile.setFocusable(true);
         tile.setClickable(true);
         tile.setPadding(dp(3), dp(3), dp(3), dp(3));
-        TextView plus = text("+  Thêm app", 14, Color.parseColor("#D0FFFFFF"), false);
+        TextView plus = text("+  Thêm app", 10, Color.parseColor("#D0FFFFFF"), false);
         plus.setGravity(Gravity.CENTER);
         GradientDrawable dashed = new GradientDrawable();
         dashed.setCornerRadius(dp(12));

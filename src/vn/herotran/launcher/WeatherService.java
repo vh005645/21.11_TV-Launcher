@@ -131,7 +131,14 @@ public final class WeatherService {
         }).start();
     }
 
+    // Vị trí mặc định cố định: Phường Nhị Chiểu, TP. Hải Phòng (không còn định vị theo IP)
+    private static final GeoLocation FIXED_LOCATION =
+            new GeoLocation("21.0000", "106.5000", "Phường Nhị Chiểu, Hải Phòng", false);
+
     private static GeoLocation detectLocation() {
+        if (FIXED_LOCATION != null) {
+            return FIXED_LOCATION;
+        }
         GeoLocation loc = cachedLocation;
         long now = SystemClock.elapsedRealtime();
         if (loc != null && !loc.isFallback && (now - lastLocationTime) < LOCATION_TTL_MS) {
@@ -456,7 +463,7 @@ public final class WeatherService {
     public static Weather sample() {
         Weather w = new Weather();
         w.sample = true;
-        w.city = "TP. Hồ Chí Minh";
+        w.city = "Phường Nhị Chiểu, Hải Phòng";
         w.condition = "Nhiều mây";
         w.temp = 31;
         w.tempMax = 32;
